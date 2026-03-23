@@ -45,7 +45,7 @@ def receive_sensor_data():
 
     now = datetime.now().isoformat()
 
-    # update latest
+    # update latest values
     latest_data["temperature"] = data.get("temperature")
     latest_data["humidity"] = data.get("humidity")
     latest_data["motion"] = data.get("motion")
@@ -54,11 +54,13 @@ def receive_sensor_data():
     latest_data["device"] = data.get("device")
     latest_data["timestamp"] = now
 
-    # track last motion
-    if data.get("motion") == "Detected":
+    # 🔥 FIXED MOTION LOGIC (robust)
+    motion_value = str(data.get("motion", "")).lower()
+
+    if "detect" in motion_value:
         latest_data["last_motion"] = now
 
-    # store history entry
+    # store history
     entry = {
         "temperature": data.get("temperature"),
         "humidity": data.get("humidity"),
@@ -68,7 +70,7 @@ def receive_sensor_data():
 
     history.append(entry)
 
-    # prevent memory explosion (keep last 1000)
+    # prevent memory overflow
     if len(history) > 1000:
         history.pop(0)
 
