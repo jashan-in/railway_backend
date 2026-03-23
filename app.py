@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 
 app = Flask(__name__)
@@ -8,6 +8,7 @@ CORS(app)
 
 API_KEY = os.getenv("API_KEY", "change-me")
 
+# latest snapshot
 latest_data = {
     "temperature": None,
     "humidity": None,
@@ -15,8 +16,12 @@ latest_data = {
     "light_level": None,
     "light_status": None,
     "device": None,
-    "timestamp": None
+    "timestamp": None,
+    "last_motion": None
 }
+
+# history storage
+history = []
 
 @app.route("/")
 def home():
@@ -28,7 +33,7 @@ def health():
 
 @app.route("/api/sensor-data", methods=["POST"])
 def receive_sensor_data():
-    global latest_data
+    global latest_data, history
 
     client_key = request.headers.get("X-API-KEY")
     if client_key != API_KEY:
@@ -38,13 +43,34 @@ def receive_sensor_data():
     if not data:
         return jsonify({"error": "No JSON received"}), 400
 
+    now = datetime.now().isoformat()
+
+    # update latest
     latest_data["temperature"] = data.get("temperature")
     latest_data["humidity"] = data.get("humidity")
     latest_data["motion"] = data.get("motion")
     latest_data["light_level"] = data.get("light_level")
     latest_data["light_status"] = data.get("light_status")
     latest_data["device"] = data.get("device")
-    latest_data["timestamp"] = datetime.now().isoformat()
+    latest_data["timestamp"] = now
+
+    # track last motion
+    if data.get("motion") == "Detected":
+        latest_data["last_motion"] = now
+
+    # store history entry
+    entry = {
+        "temperature": data.get("temperature"),
+        "humidity": data.get("humidity"),
+        "motion": data.get("motion"),
+        "timestamp": now
+    }
+
+    history.append(entry)
+
+    # prevent memory explosion (keep last 1000)
+    if len(history) > 1000:
+        history.pop(0)
 
     return jsonify({
         "message": "Sensor data received successfully",
@@ -54,6 +80,28 @@ def receive_sensor_data():
 @app.route("/api/latest", methods=["GET"])
 def get_latest_data():
     return jsonify(latest_data), 200
+
+@app.route("/api/history", methods=["GET"])
+def get_history():
+    range_param = request.args.get("range", "1h")
+
+    now = datetime.now()
+
+    if range_param == "1h":
+        cutoff = now - timedelta(hours=1)
+    elif range_param == "24h":
+        cutoff = now - timedelta(hours=24)
+    elif range_param == "7d":
+        cutoff = now - timedelta(days=7)
+    else:
+        cutoff = now - timedelta(hours=1)
+
+    filtered = [
+        item for item in history
+        if datetime.fromisoformat(item["timestamp"]) >= cutoff
+    ]
+
+    return jsonify(filtered), 200
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5000, debug=True)
