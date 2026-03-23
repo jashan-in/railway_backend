@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import os
 
 app = Flask(__name__)
@@ -8,7 +8,6 @@ CORS(app)
 
 API_KEY = os.getenv("API_KEY", "change-me")
 
-# latest snapshot
 latest_data = {
     "temperature": None,
     "humidity": None,
@@ -20,7 +19,6 @@ latest_data = {
     "last_motion": None
 }
 
-# history storage
 history = []
 
 @app.route("/")
@@ -43,9 +41,9 @@ def receive_sensor_data():
     if not data:
         return jsonify({"error": "No JSON received"}), 400
 
-    now = datetime.now().isoformat()
+    # ✅ FIX: use UTC time
+    now = datetime.now(timezone.utc).isoformat()
 
-    # update latest values
     latest_data["temperature"] = data.get("temperature")
     latest_data["humidity"] = data.get("humidity")
     latest_data["motion"] = data.get("motion")
@@ -54,9 +52,8 @@ def receive_sensor_data():
     latest_data["device"] = data.get("device")
     latest_data["timestamp"] = now
 
-    # 🔥 FIXED MOTION LOGIC (robust)
+    # robust motion detection
     motion_value = str(data.get("motion", "")).lower()
-
     if "detect" in motion_value:
         latest_data["last_motion"] = now
 
@@ -70,7 +67,6 @@ def receive_sensor_data():
 
     history.append(entry)
 
-    # prevent memory overflow
     if len(history) > 1000:
         history.pop(0)
 
@@ -87,7 +83,7 @@ def get_latest_data():
 def get_history():
     range_param = request.args.get("range", "1h")
 
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
 
     if range_param == "1h":
         cutoff = now - timedelta(hours=1)
