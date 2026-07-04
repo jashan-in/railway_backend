@@ -1,105 +1,118 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from datetime import datetime, timedelta, timezone
-import os
+from datetime import datetime, timezone
 
 app = Flask(__name__)
 CORS(app)
 
-API_KEY = os.getenv("API_KEY", "change-me")
+# In-memory store — survives only while the Railway process is alive.
+# For persistence across Railway redeploys/restarts, use a database or Redis later.
+latest_sensor_data = {}
+led_state = {"state": "off"}  # "on" | "off"
 
-latest_data = {
-    "temperature": None,
-    "humidity": None,
-    "motion": None,
-    "light_level": None,
-    "light_status": None,
-    "device": None,
-    "timestamp": None,
-    "last_motion": None
+# Stores the most recent time motion was detected.
+last_motion = {
+    "detected": False,
+    "timestamp": None
 }
 
-history = []
 
-@app.route("/")
-def home():
-    return "Smart Room Backend is running on Railway"
+def current_utc_timestamp():
+    return datetime.now(timezone.utc).isoformat()
 
-@app.route("/health")
+
+# ── Health ─────────────────────────────────────────────────────────────
+@app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"}), 200
+    return jsonify({
+        "status": "ok",
+        "timestamp": current_utc_timestamp()
+    })
 
+
+# ── Sensor data POST (from ESP32) ──────────────────────────────────────
 @app.route("/api/sensor-data", methods=["POST"])
 def receive_sensor_data():
-    global latest_data, history
+    global latest_sensor_data, last_motion
 
-    client_key = request.headers.get("X-API-KEY")
-    if client_key != API_KEY:
-        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True)
 
-    data = request.get_json()
     if not data:
-        return jsonify({"error": "No JSON received"}), 400
+        return jsonify({"error": "No JSON body"}), 400
 
-    # ✅ FIX: use UTC time
-    now = datetime.now(timezone.utc).isoformat()
+    timestamp = current_utc_timestamp()
+    data["timestamp"] = timestamp
 
-    latest_data["temperature"] = data.get("temperature")
-    latest_data["humidity"] = data.get("humidity")
-    latest_data["motion"] = data.get("motion")
-    latest_data["light_level"] = data.get("light_level")
-    latest_data["light_status"] = data.get("light_status")
-    latest_data["device"] = data.get("device")
-    latest_data["timestamp"] = now
+    # Inject current LED state so frontend can read it from /api/latest
+    data["led_state"] = led_state["state"]
 
-    # robust motion detection
-    motion_value = str(data.get("motion", "")).lower()
-    if "detect" in motion_value:
-        latest_data["last_motion"] = now
+    # Track last motion detected time
+    motion_value = data.get("motion", False)
 
-    # store history
-    entry = {
-        "temperature": data.get("temperature"),
-        "humidity": data.get("humidity"),
-        "motion": data.get("motion"),
-        "timestamp": now
-    }
+    if motion_value is True or motion_value == "true" or motion_value == 1:
+        last_motion = {
+            "detected": True,
+            "timestamp": timestamp
+        }
 
-    history.append(entry)
+    data["last_motion"] = last_motion
 
-    if len(history) > 1000:
-        history.pop(0)
+    latest_sensor_data = data
 
     return jsonify({
-        "message": "Sensor data received successfully",
-        "received": latest_data
+        "status": "ok",
+        "timestamp": timestamp,
+        "last_motion": last_motion
     }), 200
 
+
+# ── Latest sensor data GET (for dashboard) ────────────────────────────
 @app.route("/api/latest", methods=["GET"])
-def get_latest_data():
-    return jsonify(latest_data), 200
+def get_latest():
+    if not latest_sensor_data:
+        return jsonify({"error": "No data yet"}), 404
 
-@app.route("/api/history", methods=["GET"])
-def get_history():
-    range_param = request.args.get("range", "1h")
+    payload = dict(latest_sensor_data)
 
-    now = datetime.now(timezone.utc)
+    # Always inject current LED state on every read
+    payload["led_state"] = led_state["state"]
 
-    if range_param == "1h":
-        cutoff = now - timedelta(hours=1)
-    elif range_param == "24h":
-        cutoff = now - timedelta(hours=24)
-    elif range_param == "7d":
-        cutoff = now - timedelta(days=7)
-    else:
-        cutoff = now - timedelta(hours=1)
+    # Always include last motion state
+    payload["last_motion"] = last_motion
 
-    filtered = [
-        item for item in history
-        if datetime.fromisoformat(item["timestamp"]) >= cutoff
-    ]
+    return jsonify(payload)
 
-    return jsonify(filtered), 200
+
+# ── LED control ────────────────────────────────────────────────────────
+@app.route("/api/led", methods=["GET"])
+def get_led():
+    """ESP32 polls this every few seconds to sync the physical LED."""
+    return jsonify({
+        "led_state": led_state["state"],
+        "timestamp": current_utc_timestamp(),
+    })
+
+
+@app.route("/api/led", methods=["POST"])
+def set_led():
+    """Dashboard sends { 'state': 'on' | 'off' } to control the LED."""
+    data = request.get_json(silent=True)
+
+    if not data:
+        return jsonify({"error": "No JSON body"}), 400
+
+    requested = str(data.get("state", "")).lower()
+
+    if requested not in ("on", "off"):
+        return jsonify({"error": "state must be 'on' or 'off'"}), 400
+
+    led_state["state"] = requested
+
+    return jsonify({
+        "led_state": led_state["state"],
+        "timestamp": current_utc_timestamp(),
+    }), 200
+
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    app.run(debug=True)
