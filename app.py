@@ -5,12 +5,10 @@ from datetime import datetime, timezone
 app = Flask(__name__)
 CORS(app)
 
-# In-memory store — survives only while the Railway process is alive.
-# For persistence across Railway redeploys/restarts, use a database or Redis later.
 latest_sensor_data = {}
-led_state = {"state": "off"}  # "on" | "off"
+led_state = {"state": "off"}
+servo_state = {"state": "closed", "angle": 0}
 
-# Stores the most recent time motion was detected.
 last_motion = {
     "detected": False,
     "timestamp": None
@@ -21,7 +19,6 @@ def current_utc_timestamp():
     return datetime.now(timezone.utc).isoformat()
 
 
-# ── Health ─────────────────────────────────────────────────────────────
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({
@@ -30,7 +27,6 @@ def health():
     })
 
 
-# ── Sensor data POST (from ESP32) ──────────────────────────────────────
 @app.route("/api/sensor-data", methods=["POST"])
 def receive_sensor_data():
     global latest_sensor_data, last_motion
@@ -42,11 +38,10 @@ def receive_sensor_data():
 
     timestamp = current_utc_timestamp()
     data["timestamp"] = timestamp
-
-    # Inject current LED state so frontend can read it from /api/latest
     data["led_state"] = led_state["state"]
+    data["servo_state"] = servo_state["state"]
+    data["servo_angle"] = servo_state["angle"]
 
-    # Track last motion detected time
     motion_value = data.get("motion", False)
 
     if motion_value is True or motion_value == "true" or motion_value == 1:
@@ -56,7 +51,6 @@ def receive_sensor_data():
         }
 
     data["last_motion"] = last_motion
-
     latest_sensor_data = data
 
     return jsonify({
@@ -66,27 +60,22 @@ def receive_sensor_data():
     }), 200
 
 
-# ── Latest sensor data GET (for dashboard) ────────────────────────────
 @app.route("/api/latest", methods=["GET"])
 def get_latest():
     if not latest_sensor_data:
         return jsonify({"error": "No data yet"}), 404
 
     payload = dict(latest_sensor_data)
-
-    # Always inject current LED state on every read
     payload["led_state"] = led_state["state"]
-
-    # Always include last motion state
+    payload["servo_state"] = servo_state["state"]
+    payload["servo_angle"] = servo_state["angle"]
     payload["last_motion"] = last_motion
 
     return jsonify(payload)
 
 
-# ── LED control ────────────────────────────────────────────────────────
 @app.route("/api/led", methods=["GET"])
 def get_led():
-    """ESP32 polls this every few seconds to sync the physical LED."""
     return jsonify({
         "led_state": led_state["state"],
         "timestamp": current_utc_timestamp(),
@@ -95,7 +84,6 @@ def get_led():
 
 @app.route("/api/led", methods=["POST"])
 def set_led():
-    """Dashboard sends { 'state': 'on' | 'off' } to control the LED."""
     data = request.get_json(silent=True)
 
     if not data:
@@ -110,6 +98,38 @@ def set_led():
 
     return jsonify({
         "led_state": led_state["state"],
+        "timestamp": current_utc_timestamp(),
+    }), 200
+
+
+# ── Servo control ──────────────────────────────────────────────────────
+@app.route("/api/servo", methods=["GET"])
+def get_servo():
+    return jsonify({
+        "servo_state": servo_state["state"],
+        "servo_angle": servo_state["angle"],
+        "timestamp": current_utc_timestamp(),
+    })
+
+
+@app.route("/api/servo", methods=["POST"])
+def set_servo():
+    data = request.get_json(silent=True)
+
+    if not data:
+        return jsonify({"error": "No JSON body"}), 400
+
+    requested = str(data.get("state", "")).lower()
+
+    if requested not in ("open", "closed"):
+        return jsonify({"error": "state must be 'open' or 'closed'"}), 400
+
+    servo_state["state"] = requested
+    servo_state["angle"] = 90 if requested == "open" else 0
+
+    return jsonify({
+        "servo_state": servo_state["state"],
+        "servo_angle": servo_state["angle"],
         "timestamp": current_utc_timestamp(),
     }), 200
 
